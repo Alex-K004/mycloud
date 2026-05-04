@@ -12,4 +12,4 @@
 См. `backend/README.md` и `frontend/README.md`.
 
 ## Автор
-[Ваше имя]
+[Alex-K004]
