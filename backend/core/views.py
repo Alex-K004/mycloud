@@ -67,15 +67,12 @@ class UserViewSet(viewsets.ModelViewSet):
             return User.objects.all()
         return User.objects.filter(id=self.request.user.id)
     
-    def destroy(self, request, *args, **kwargs):
-        user = self.get_object()
-        # Удаляем файлы с диска
-        for f in user.files.all():
-            os.remove(f.file_path)  # полный путь
-        delete_user_storage(user)
-        user.delete()
-        logger.info(f"Admin {request.user.username} deleted user {user.username}")
-        return Response(status=status.HTTP_204_NO_CONTENT)
+# ИСПРАВЛЕНО: стандартное удаление с очисткой файла с диска
+    def perform_destroy(self, instance):
+        full_path = os.path.join(settings.MEDIA_ROOT, instance.file_path)
+        if os.path.exists(full_path):
+            os.remove(full_path)
+            instance.delete()
     
     @action(detail=True, methods=['patch'])
     def toggle_admin(self, request, pk=None):
@@ -101,10 +98,9 @@ class FileViewSet(viewsets.ModelViewSet):
         return File.objects.filter(owner=user)
     
     def perform_create(self, serializer):
-        # Загрузка файла
         uploaded_file = self.request.FILES.get('file')
         if not uploaded_file:
-            raise serializers.ValidationError("No file provided")
+            raise serializers.ValidationError({"file": "No file provided"})  # уже корректно
         owner = self.request.user
         # Если админ и передан user_id, загружаем для другого пользователя
         if self.request.user.is_admin and self.request.data.get('user_id'):

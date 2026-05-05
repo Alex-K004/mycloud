@@ -22,7 +22,7 @@ export const deleteFile = createAsyncThunk('files/delete', async (fileId) => {
 });
 
 export const renameFile = createAsyncThunk('files/rename', async ({ fileId, newName }) => {
-  const response = await api.put(`/files/${fileId}/rename/`, { new_name: newName });
+  const response = await api.patch(`/files/${fileId}/`, { original_name: newName }); // ИСПРАВЛЕНО
   return response.data;
 });
 

@@ -43,3 +43,4 @@ class FileSerializer(serializers.ModelSerializer):
         model = File
         fields = ('id', 'original_name', 'size', 'uploaded_at', 'last_downloaded_at', 'comment', 'share_link')
         read_only_fields = ('id', 'size', 'uploaded_at', 'last_downloaded_at', 'share_link')
+        # ИСПРАВЛЕНО: original_name теперь можно обновлять через PATCH
