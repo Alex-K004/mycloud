@@ -8,22 +8,20 @@ from rest_framework import viewsets, status, generics
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
-from django.contrib.auth import login,logout
+from django.contrib.auth import login, logout, authenticate
 from django.conf import settings
 from .models import User, File
-from .serializers import (UserRegistrationSerializer, UserListSerializer,
-                          FileSerializer)
+from .serializers import UserRegistrationSerializer, UserListSerializer, FileSerializer
 from .permissions import IsAdminOrOwner, IsAdminOrSelf
 from .utils import create_user_storage, delete_user_storage
 from rest_framework import serializers
 
 logger = logging.getLogger(__name__)
 
-# Регистрация
 class RegisterView(generics.CreateAPIView):
     serializer_class = UserRegistrationSerializer
     permission_classes = [AllowAny]
-    
+
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -32,14 +30,12 @@ class RegisterView(generics.CreateAPIView):
         logger.info(f"New user registered: {user.username}")
         return Response({"message": "User created"}, status=status.HTTP_201_CREATED)
 
-# Логин (через стандартную Django-сессию)
 class LoginView(generics.GenericAPIView):
     permission_classes = [AllowAny]
-    
+
     def post(self, request):
         username = request.data.get('username')
         password = request.data.get('password')
-        from django.contrib.auth import authenticate
         user = authenticate(request, username=username, password=password)
         if user is not None:
             login(request, user)
@@ -47,33 +43,36 @@ class LoginView(generics.GenericAPIView):
             return Response({"message": "Logged in", "is_admin": user.is_admin})
         return Response({"error": "Invalid credentials"}, status=status.HTTP_400_BAD_REQUEST)
 
-# Логаут
 class LogoutView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated]
-    
+
     def post(self, request):
         logout(request)
         return Response({"message": "Logged out"})
 
-# ViewSet для пользователей (админ)
 class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all()
     serializer_class = UserListSerializer
     permission_classes = [IsAuthenticated, IsAdminOrSelf]
-    
+
     def get_queryset(self):
-        # Админ видит всех, обычный пользователь только себя
         if self.request.user.is_admin:
             return User.objects.all()
         return User.objects.filter(id=self.request.user.id)
-    
-# ИСПРАВЛЕНО: стандартное удаление с очисткой файла с диска
+
+    # ИСПРАВЛЕНО: корректное удаление пользователя и всех его файлов
     def perform_destroy(self, instance):
-        full_path = os.path.join(settings.MEDIA_ROOT, instance.file_path)
-        if os.path.exists(full_path):
-            os.remove(full_path)
-            instance.delete()
-    
+        # Удаляем все файлы пользователя с диска
+        for file in instance.files.all():
+            full_path = os.path.join(settings.MEDIA_ROOT, file.file_path)
+            if os.path.exists(full_path):
+                os.remove(full_path)
+        # Удаляем папку пользователя
+        delete_user_storage(instance)
+        # Удаляем пользователя из БД
+        instance.delete()
+        logger.info(f"Admin {self.request.user.username} deleted user {instance.username}")
+
     @action(detail=True, methods=['patch'])
     def toggle_admin(self, request, pk=None):
         if not request.user.is_admin:
@@ -83,30 +82,25 @@ class UserViewSet(viewsets.ModelViewSet):
         user.save()
         return Response({"is_admin": user.is_admin})
 
-# ViewSet для файлов
 class FileViewSet(viewsets.ModelViewSet):
-    queryset = File.objects.none()
     serializer_class = FileSerializer
     permission_classes = [IsAuthenticated, IsAdminOrOwner]
-    
+
     def get_queryset(self):
         user = self.request.user
-        # Параметр ?user_id= для администратора
         if user.is_admin and self.request.query_params.get('user_id'):
             target_user = get_object_or_404(User, id=self.request.query_params['user_id'])
             return File.objects.filter(owner=target_user)
         return File.objects.filter(owner=user)
-    
+
     def perform_create(self, serializer):
         uploaded_file = self.request.FILES.get('file')
         if not uploaded_file:
-            raise serializers.ValidationError({"file": "No file provided"})  # уже корректно
+            raise serializers.ValidationError("No file provided")
         owner = self.request.user
-        # Если админ и передан user_id, загружаем для другого пользователя
         if self.request.user.is_admin and self.request.data.get('user_id'):
             owner = get_object_or_404(User, id=self.request.data['user_id'])
-        
-        # Генерируем уникальное имя файла на диске
+
         import uuid
         ext = os.path.splitext(uploaded_file.name)[1]
         unique_name = f"{uuid.uuid4().hex}{ext}"
@@ -114,11 +108,11 @@ class FileViewSet(viewsets.ModelViewSet):
         absolute_dir = os.path.join(settings.MEDIA_ROOT, relative_dir)
         os.makedirs(absolute_dir, exist_ok=True)
         dest_path = os.path.join(absolute_dir, unique_name)
-        
+
         with open(dest_path, 'wb+') as f:
             for chunk in uploaded_file.chunks():
                 f.write(chunk)
-        
+
         relative_file_path = os.path.join(relative_dir, unique_name)
         instance = serializer.save(
             owner=owner,
@@ -127,7 +121,15 @@ class FileViewSet(viewsets.ModelViewSet):
             file_path=relative_file_path
         )
         logger.info(f"File uploaded: {instance.original_name} by {owner.username}")
-    
+
+    # ИСПРАВЛЕНО: стандартное удаление с очисткой файла с диска
+    def perform_destroy(self, instance):
+        full_path = os.path.join(settings.MEDIA_ROOT, instance.file_path)
+        if os.path.exists(full_path):
+            os.remove(full_path)
+        instance.delete()
+        logger.info(f"File deleted: {instance.original_name}")
+
     @action(detail=True, methods=['put'])
     def rename(self, request, pk=None):
         file = self.get_object()
@@ -137,7 +139,7 @@ class FileViewSet(viewsets.ModelViewSet):
         file.original_name = new_name
         file.save()
         return Response(FileSerializer(file).data)
-    
+
     @action(detail=True, methods=['patch'])
     def update_comment(self, request, pk=None):
         file = self.get_object()
@@ -145,7 +147,7 @@ class FileViewSet(viewsets.ModelViewSet):
         file.comment = comment
         file.save()
         return Response(FileSerializer(file).data)
-    
+
     @action(detail=True, methods=['get'])
     def download(self, request, pk=None):
         file = self.get_object()
@@ -156,9 +158,9 @@ class FileViewSet(viewsets.ModelViewSet):
         file.save(update_fields=['last_downloaded_at'])
         response = FileResponse(open(full_path, 'rb'), content_type='application/octet-stream')
         response['Content-Disposition'] = f'attachment; filename="{file.original_name}"'
-        logger.info(f"File downloaded: {file.original_name} by {request.user.username}")
+        logger.info(f"File downloaded: {file.original_name} by {self.request.user.username}")
         return response
-    
+
     @action(detail=False, methods=['get'], url_path='share/(?P<link>[^/.]+)')
     def download_by_share_link(self, request, link=None):
         file = get_object_or_404(File, share_link=link)
@@ -172,12 +174,4 @@ class FileViewSet(viewsets.ModelViewSet):
         logger.info(f"File downloaded via share link: {file.original_name}")
         return response
 
-    @action(detail=True, methods=['delete'])
-    def delete_file(self, request, pk=None):
-        file = self.get_object()
-        full_path = os.path.join(settings.MEDIA_ROOT, file.file_path)
-        if os.path.exists(full_path):
-            os.remove(full_path)
-        file.delete()
-        logger.info(f"File deleted: {file.original_name}")
-        return Response(status=status.HTTP_204_NO_CONTENT)
+    # (удалён дублирующий @action delete_file)
